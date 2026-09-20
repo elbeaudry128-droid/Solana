@@ -26,7 +26,7 @@ export class PoolMonitor {
 
         if (logs && logs.some(log => log.includes('initialize2'))) {
           logger.info(`Nouveau pool détecté ! Signature: ${signature}`);
-          this.processNewPool(signature, callback);
+          await this.processNewPool(signature, callback);
         }
       },
       'confirmed'
@@ -40,28 +40,29 @@ export class PoolMonitor {
         commitment: 'confirmed',
       });
 
-      if (!transaction) return;
+      if (!transaction || !transaction.meta) return;
 
-      // Logique simplifiée pour extraire le mint du token
-      // Dans un vrai bot, on analyserait les comptes de l'instruction initialize2
-      const accounts = transaction.transaction.message.accountKeys.map(k => k.pubkey.toString());
-      
-      // L'adresse du pool et des tokens se trouvent dans les comptes de l'instruction
-      // Pour Raydium V4 initialize2, le token mint est généralement à un index spécifique
-      // Ceci est une version simplifiée, l'analyse précise nécessite de parser l'instruction
-      
-      logger.info('Analyse de la transaction pour extraire les informations du pool...');
-      
-      // Exemple : on cherche le token qui n'est pas du SOL/USDC/USDT
-      const knownMints = [
-        'So11111111111111111111111111111111111111112', // SOL
-        'EPjFW38Ro2zMLen87GVxcWB85Lisbx1EtMSfgNVdqMdg', // USDC
-        'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB', // USDT
-      ];
+      // Dans Raydium V4 initialize2, les comptes sont structurés de manière prévisible
+      // On cherche les instructions du programme Raydium
+      const innerInstructions = transaction.meta.innerInstructions;
+      const accountKeys = transaction.transaction.message.accountKeys;
 
-      // Cette partie nécessite une analyse plus fine des instructions pour être 100% fiable
-      // Pour cet exemple, nous simulons la détection
-      // callback(tokenMint, poolId);
+      // Extraction du poolId et des tokens
+      // Pour Raydium V4, le poolId est souvent le compte index 4 dans l'instruction initialize2
+      // Les tokens sont aux index 8 et 9
+
+      // Analyse plus robuste : on cherche les mints dans les postTokenBalances
+      const postTokenBalances = transaction.meta.postTokenBalances || [];
+      const mints = postTokenBalances
+        .map(b => b.mint)
+        .filter(m => m !== 'So11111111111111111111111111111111111111112'); // Exclure le WSOL
+
+      if (mints.length > 0) {
+        const tokenMint = mints[0]!;
+        const poolId = accountKeys[4]?.pubkey.toString() || 'unknown';
+        logger.info(`Token identifié : ${tokenMint} | Pool : ${poolId}`);
+        callback(tokenMint, poolId);
+      }
     } catch (error) {
       logger.error(`Erreur lors du traitement du nouveau pool: ${error}`);
     }

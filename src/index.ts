@@ -36,7 +36,7 @@ async function main() {
   const monitor = new PoolMonitor(connection);
   const executor = new SwapExecutor(connection, wallet);
   const excavator = new Excavator();
-  
+
   const useJito = process.env.USE_JITO === 'true';
   const jitoExecutor = useJito ? new JitoExecutor(connection, wallet, process.env.JITO_BLOCK_ENGINE_URL || 'frankfurt.mainnet.block-engine.jito.wtf') : null;
 
@@ -46,7 +46,7 @@ async function main() {
 
   await monitor.start(async (tokenMint, poolId) => {
     logger.info(`--- Nouveau Token Détecté : ${tokenMint} ---`);
-    
+
     // Phase Excavator : Analyse de sécurité
     const report = await excavator.analyzeToken(tokenMint);
     if (!report.isSafe) {

@@ -1,7 +1,7 @@
-import { 
-  Connection, 
-  Keypair, 
-  VersionedTransaction, 
+import {
+  Connection,
+  Keypair,
+  VersionedTransaction,
   PublicKey,
   SystemProgram,
   TransactionMessage
@@ -17,7 +17,6 @@ const logger = pino({
   },
 });
 
-// Adresses des tips Jito (Block Engine)
 const JITO_TIP_ACCOUNTS = [
   '96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5',
   'HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe',
@@ -32,30 +31,32 @@ const JITO_TIP_ACCOUNTS = [
 export class JitoExecutor {
   private connection: Connection;
   private wallet: Keypair;
-  private searcher;
+  private searcher: any;
 
   constructor(connection: Connection, wallet: Keypair, blockEngineUrl: string) {
     this.connection = connection;
     this.wallet = wallet;
-    this.searcher = searcherClient(blockEngineUrl, wallet);
+    try {
+      this.searcher = searcherClient(blockEngineUrl, wallet);
+    } catch (e) {
+      logger.error(`Échec de l'initialisation du client Jito Searcher: ${e}`);
+    }
   }
 
-  /**
-   * Envoie une transaction via un Bundle Jito pour éviter le front-running et garantir la priorité
-   */
   public async sendBundle(transactions: VersionedTransaction[], tipAmountLamports: number) {
+    if (!this.searcher) {
+      logger.error('Client Jito non initialisé.');
+      return null;
+    }
+
     try {
-      logger.info(`Préparation du Bundle Jito avec un tip de ${tipAmountLamports} lamports...`);
-
-      // Sélectionner un compte de tip aléatoire
       const tipAccount = JITO_TIP_ACCOUNTS[Math.floor(Math.random() * JITO_TIP_ACCOUNTS.length)]!;
+      const { blockhash } = await this.connection.getLatestBlockhash('finalized');
 
-      // Créer la transaction de tip
-      const { blockhash } = await this.connection.getLatestBlockhash();
       const tipIxn = SystemProgram.transfer({
         fromPubkey: this.wallet.publicKey,
         toPubkey: tipAccount,
-        lamports: tipAmountLamports,
+        lamports: Math.floor(tipAmountLamports),
       });
 
       const messageV0 = new TransactionMessage({
@@ -67,15 +68,32 @@ export class JitoExecutor {
       const tipTx = new VersionedTransaction(messageV0);
       tipTx.sign([this.wallet]);
 
-      // Ajouter la transaction de tip au bundle
       const bundle = new Bundle([...transactions, tipTx], 5);
-      
-      const bundleId = await this.searcher.sendBundle(bundle);
-      logger.info(`Bundle envoyé avec succès ! ID: ${bundleId}`);
-      
-      return bundleId;
-    } catch (error) {
-      logger.error(`Erreur lors de l'envoi du Bundle Jito: ${error}`);
+
+      const result = await this.searcher.sendBundle(bundle);
+
+      // La réponse de Jito peut être un objet Result (ok/err)
+      if (result.ok) {
+        const bundleId = result.ok;
+        logger.info(`Bundle Jito envoyé ! ID: ${bundleId}`);
+
+        // Suivi optionnel du résultat du bundle
+        this.searcher.onBundleResult(
+          (bundleResult: any) => {
+            logger.info(`Résultat Bundle ${bundleId}: ${JSON.stringify(bundleResult)}`);
+          },
+          (err: any) => {
+            logger.error(`Erreur suivi Bundle ${bundleId}: ${err}`);
+          }
+        );
+
+        return bundleId;
+      } else {
+        logger.error(`Échec de l'envoi du Bundle Jito: ${JSON.stringify(result.err)}`);
+        return null;
+      }
+    } catch (error: any) {
+      logger.error(`Exception lors de l'envoi du Bundle Jito: ${error.message}`);
       return null;
     }
   }

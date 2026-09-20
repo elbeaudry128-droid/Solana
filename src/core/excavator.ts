@@ -17,51 +17,51 @@ export class Excavator {
   private rugCheckApi = 'https://api.rugcheck.xyz/v1';
 
   /**
-   * Analyse un token via RugCheck API et des vérifications personnalisées
+   * Analyse un token via RugCheck API
    */
   public async analyzeToken(mint: string): Promise<TokenSecurityReport> {
     logger.info(`Excavator : Analyse du token ${mint}...`);
-    
+
     try {
+      // Utilisation de l'endpoint summary qui est plus léger et souvent plus stable
       const response = await axios.get(`${this.rugCheckApi}/tokens/${mint}/report/summary`);
       const data = response.data;
 
       const risks: string[] = [];
-      let score = 0;
+      let score = data.score || 0;
 
-      // Analyse des risques retournés par RugCheck
       if (data.risks) {
         data.risks.forEach((risk: any) => {
-          if (risk.level === 'danger') {
-            risks.push(`DANGER: ${risk.name} - ${risk.description}`);
-          } else if (risk.level === 'warn') {
-            risks.push(`WARN: ${risk.name}`);
-          }
+          risks.push(`${risk.level.toUpperCase()}: ${risk.name}`);
         });
       }
 
-      // Vérifications spécifiques
-      const isMintRenounced = data.token?.mintAuthority === null;
-      const isFreezeDisabled = data.token?.freezeAuthority === null;
-      const lpBurned = data.lpLocked === 100 || data.lpBurned === 100;
+      // Vérifications manuelles basées sur les données du token
+      const tokenData = data.token || {};
+      const isMintRenounced = tokenData.mintAuthority === null || tokenData.mintAuthority === undefined;
+      const isFreezeDisabled = tokenData.freezeAuthority === null || tokenData.freezeAuthority === undefined;
 
-      if (!isMintRenounced) risks.push('Mint Authority non renoncée');
-      if (!isFreezeDisabled) risks.push('Freeze Authority activée');
-      if (!lpBurned) risks.push('Liquidité non brûlée/bloquée');
+      if (!isMintRenounced) risks.push('WARN: Mint Authority non renoncée');
+      if (!isFreezeDisabled) risks.push('DANGER: Freeze Authority activée');
 
-      score = data.score || 0;
-
-      // Un token est considéré "Safe" si le score est bas et qu'il n'y a pas de risques critiques
-      const isSafe = score < 500 && risks.filter(r => r.startsWith('DANGER')).length === 0;
+      // Seuil de sécurité : score < 1000 et pas de risques de niveau DANGER
+      const hasDanger = risks.some(r => r.startsWith('DANGER'));
+      const isSafe = score < 1000 && !hasDanger;
 
       return {
         isSafe,
         risks,
         score
       };
-    } catch (error) {
-      logger.error(`Erreur Excavator lors de l'analyse de ${mint}: ${error}`);
-      return { isSafe: false, risks: ['Erreur d\'analyse'], score: 9999 };
+    } catch (error: any) {
+      // Si RugCheck échoue (ex: token trop récent), on peut soit bloquer, soit faire des vérifications on-chain basiques
+      // Pour ce bot, on choisit la prudence : on bloque si l'analyse échoue
+      logger.error(`Erreur Excavator pour ${mint}: ${error.message}`);
+      return {
+        isSafe: false,
+        risks: [`Erreur API ou Token non indexé: ${error.message}`],
+        score: 9999
+      };
     }
   }
 }
