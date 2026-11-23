@@ -1,74 +1,96 @@
+import { pathToFileURL } from 'node:url';
 import { Connection, Keypair } from '@solana/web3.js';
 import * as dotenv from 'dotenv';
 import bs58 from 'bs58';
 import pino from 'pino';
 import { PoolMonitor } from './core/monitor.js';
-import { SwapExecutor } from './core/executor.js';
 import { Excavator } from './core/excavator.js';
-import { JitoExecutor } from './core/jito.js';
+import { ConfigError, loadConfig } from './config.js';
 
-dotenv.config();
+async function main(): Promise<void> {
+  const logger = pino({ transport: { target: 'pino-pretty' } });
+  dotenv.config({ quiet: true });
 
-const logger = pino({
-  transport: {
-    target: 'pino-pretty',
-  },
-});
-
-async function main() {
-  logger.info('Initialisation du Sniper Bot Solana...');
-
-  const rpcUrl = process.env.RPC_URL || 'https://api.mainnet-beta.solana.com';
-  const wsUrl = process.env.WS_URL || 'wss://api.mainnet-beta.solana.com';
-  const connection = new Connection(rpcUrl, {
-    wsEndpoint: wsUrl,
-    commitment: 'confirmed',
-  });
-
-  if (!process.env.PRIVATE_KEY) {
-    logger.error('Erreur : PRIVATE_KEY manquante dans le fichier .env');
-    process.exit(1);
+  let config;
+  try {
+    config = loadConfig();
+  } catch (error) {
+    logger.error(error instanceof ConfigError ? error.message : 'Erreur de configuration.');
+    process.exitCode = 1;
+    return;
   }
 
-  const wallet = Keypair.fromSecretKey(bs58.decode(process.env.PRIVATE_KEY));
-  logger.info(`Wallet chargé : ${wallet.publicKey.toString()}`);
-
-  const monitor = new PoolMonitor(connection);
-  const executor = new SwapExecutor(connection, wallet);
-  const excavator = new Excavator();
-
-  const useJito = process.env.USE_JITO === 'true';
-  const jitoExecutor = useJito ? new JitoExecutor(connection, wallet, process.env.JITO_BLOCK_ENGINE_URL || 'frankfurt.mainnet.block-engine.jito.wtf') : null;
-
-  const buyAmount = parseFloat(process.env.BUY_AMOUNT || '0.1');
-  const slippage = parseInt(process.env.SLIPPAGE || '15') * 100;
-  const jitoTip = parseFloat(process.env.JITO_TIP || '0.001') * 10**9;
-
-  await monitor.start(async (tokenMint, poolId) => {
-    logger.info(`--- Nouveau Token Détecté : ${tokenMint} ---`);
-
-    // Phase Excavator : Analyse de sécurité
-    const report = await excavator.analyzeToken(tokenMint);
-    if (!report.isSafe) {
-      logger.warn(`Token rejeté par Excavator. Raisons : ${report.risks.join(', ')}`);
+  let wallet: Keypair | undefined;
+  if (!config.dryRun) {
+    try {
+      wallet = Keypair.fromSecretKey(bs58.decode(config.privateKey));
+    } catch {
+      // Never print the key or the raw exception.
+      logger.error('PRIVATE_KEY doit être une clé secrète Solana valide encodée en base58.');
+      process.exitCode = 1;
       return;
     }
-    logger.info('Token validé par Excavator. Lancement de l\'achat...');
+  }
 
-    // Phase Exécution
-    if (useJito && jitoExecutor) {
-      const transaction = await executor.prepareBuyTransaction(tokenMint, buyAmount, slippage);
-      if (transaction) {
-        const bundleId = await jitoExecutor.sendBundle([transaction], jitoTip);
-        if (bundleId) logger.info(`Achat via Jito Bundle réussi. ID: ${bundleId}`);
+  const connection = new Connection(config.rpcUrl, {
+    ...(config.wsUrl ? { wsEndpoint: config.wsUrl } : {}),
+    commitment: 'confirmed',
+  });
+  const monitor = new PoolMonitor(connection);
+  const excavator = new Excavator();
+  let executor: import('./core/executor.js').SwapExecutor | undefined;
+  let jitoExecutor: import('./core/jito.js').JitoExecutor | undefined;
+
+  if (!config.dryRun && wallet) {
+    const { SwapExecutor } = await import('./core/executor.js');
+    executor = new SwapExecutor(connection, wallet, { apiKey: config.jupiterApiKey });
+    if (config.useJito) {
+      const { JitoExecutor } = await import('./core/jito.js');
+      jitoExecutor = new JitoExecutor(connection, wallet, config.jitoBlockEngineUrl);
+    }
+    logger.warn('Mode réel activé : des achats automatiques peuvent être envoyés.');
+  } else {
+    logger.info('Mode observation : aucune transaction ne sera construite, signée ou envoyée.');
+  }
+
+  await monitor.start(async (tokenMint, poolId) => {
+    try {
+      logger.info(`Pool détecté : ${poolId} | token : ${tokenMint}`);
+      const report = await excavator.analyzeToken(tokenMint);
+      if (!report.isSafe) {
+        logger.warn(`Token rejeté par l’analyse limitée : ${report.risks.join(', ')}`);
+        return;
       }
-    } else {
-      const txid = await executor.buyToken(tokenMint, buyAmount, slippage);
-      if (txid) logger.info(`Achat via RPC standard réussi. TXID: ${txid}`);
+      logger.info('Aucun risque bloquant relevé par l’analyse limitée ; cela ne garantit pas la sécurité du token.');
+
+      if (config.dryRun) {
+        logger.info('Observation seulement : achat non préparé et non envoyé.');
+        return;
+      }
+      if (!executor) throw new Error('Exécuteur indisponible.');
+
+      if (config.useJito) {
+        if (!jitoExecutor) throw new Error('Exécuteur Jito indisponible.');
+        const prepared = await executor.prepareBuyTransaction(tokenMint, config.buyAmountSol, config.slippageBps, true);
+        if (prepared) {
+          // JitoExecutor logs submission as non confirmed before following confirmation.
+          await jitoExecutor.sendBundle([prepared.transaction], config.jitoTipLamports, prepared.lastValidBlockHeight);
+        }
+      } else {
+        const txid = await executor.buyToken(tokenMint, config.buyAmountSol, config.slippageBps);
+        if (txid) logger.info(`Achat confirmé : ${txid}`);
+      }
+    } catch {
+      // RPC and HTTP errors can embed credentials; keep this log free of raw errors.
+      logger.error('Échec du traitement du pool ; aucun succès ne peut être déduit.');
     }
   });
 }
 
-main().catch(err => {
-  logger.error(`Erreur fatale : ${err}`);
-});
+// Importing the module must not start the monitor or open a network connection.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main().catch(() => {
+    console.error('Erreur fatale au démarrage du bot.');
+    process.exitCode = 1;
+  });
+}
