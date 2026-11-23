@@ -6,6 +6,7 @@ import pino from 'pino';
 import { PoolMonitor } from './core/monitor.js';
 import { Excavator } from './core/excavator.js';
 import { ConfigError, loadConfig } from './config.js';
+import { createJupiterObservation, startRaydiumWithJupiter } from './core/jupiterBindings.js';
 
 async function main(): Promise<void> {
   const logger = pino({ transport: { target: 'pino-pretty' } });
@@ -38,6 +39,7 @@ async function main(): Promise<void> {
   });
   const monitor = new PoolMonitor(connection);
   const excavator = new Excavator();
+  const jupiterObservation = createJupiterObservation(config, logger);
   let executor: import('./core/executor.js').SwapExecutor | undefined;
   let jitoExecutor: import('./core/jito.js').JitoExecutor | undefined;
 
@@ -53,7 +55,9 @@ async function main(): Promise<void> {
     logger.info('Mode observation : aucune transaction ne sera construite, signée ou envoyée.');
   }
 
-  await monitor.start(async (tokenMint, poolId) => {
+  // Jupiter recent is a separate log-only source. Raydium events are enqueued
+  // for enrichment without waiting for Jupiter or changing the RugCheck path.
+  await startRaydiumWithJupiter(monitor, async (tokenMint, poolId) => {
     try {
       logger.info(`Pool détecté : ${poolId} | token : ${tokenMint}`);
       const report = await excavator.analyzeToken(tokenMint);
@@ -84,6 +88,8 @@ async function main(): Promise<void> {
       // RPC and HTTP errors can embed credentials; keep this log free of raw errors.
       logger.error('Échec du traitement du pool ; aucun succès ne peut être déduit.');
     }
+  }, jupiterObservation, () => {
+    logger.warn('Enrichissement Jupiter indisponible ; observation Raydium conservée.');
   });
 }
 

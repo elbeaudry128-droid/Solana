@@ -16,6 +16,9 @@ type BaseConfig = {
   useJito: boolean;
   jitoBlockEngineUrl: string;
   jitoTipLamports: number;
+  jupiterTokensEnabled: boolean;
+  jupiterTokensApiKey?: string;
+  jupiterTokensPollIntervalMs: number;
 };
 
 export type Config = BaseConfig & (
@@ -40,6 +43,15 @@ function booleanValue(env: Environment, name: string, fallback: boolean): boolea
   if (raw === 'true') return true;
   if (raw === 'false') return false;
   throw new ConfigError(`${name} doit être exactement true ou false.`);
+}
+
+function tokensPollInterval(env: Environment): number {
+  const raw = value(env, 'JUPITER_TOKENS_POLL_INTERVAL_MS', '5000')!;
+  const interval = Number(raw);
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(interval) || interval < 5_000 || interval > 60_000) {
+    throw new ConfigError('JUPITER_TOKENS_POLL_INTERVAL_MS doit être un entier entre 5000 et 60000 inclus.');
+  }
+  return interval;
 }
 
 // Decimal arithmetic in integer units; no parseFloat, exponent or silent rounding.
@@ -92,6 +104,10 @@ export function loadConfig(env: Environment = process.env): Config {
     throw new ConfigError('DRY_RUN=false est désactivé : la transaction Jupiter doit être validée indépendamment avant toute signature.');
   }
   const useJito = booleanValue(env, 'USE_JITO', false);
+  const jupiterTokensEnabled = booleanValue(env, 'JUPITER_TOKENS_ENABLED', false);
+  const jupiterTokensPollIntervalMs = tokensPollInterval(env);
+  // Une clé non utilisée n'est ni lue ni validée lorsque l'observation Tokens est désactivée.
+  const jupiterTokensApiKey = jupiterTokensEnabled ? value(env, 'JUPITER_TOKENS_API_KEY') : undefined;
   const buyAmountLamports = solUnits(env, 'BUY_AMOUNT', '0.1', true);
   const buyAmountSol = buyAmountLamports / 1_000_000_000;
   if (Math.round(buyAmountSol * 1_000_000_000) !== buyAmountLamports) {
@@ -117,6 +133,9 @@ export function loadConfig(env: Environment = process.env): Config {
     useJito,
     jitoBlockEngineUrl,
     jitoTipLamports,
+    jupiterTokensEnabled,
+    jupiterTokensApiKey,
+    jupiterTokensPollIntervalMs,
   };
 
   if (dryRun) return { ...base, dryRun: true };
